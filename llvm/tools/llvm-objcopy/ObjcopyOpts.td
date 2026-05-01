@@ -60,6 +60,17 @@ defm rename_section
          "Rename sections called <old> to <new>, and apply any specified <flag> values. "
          "See --set-section-flags for a list of supported flags">,
       MetaVarName<"old=new[,flag1,...]">;
+defm rename_sections
+    : Eq<"rename-sections",
+         "Read section rename rules from <filename> and run as if "
+         "--rename-section=<old>=<new>[,flag1,...] is set for each one. "
+         "Each line in <filename> has the form '<old> <new>[,flag1,...]'. "
+         "Lines may contain comments beginning with '#'. Leading and trailing "
+         "whitespace is stripped from each line. May be repeated to read "
+         "sections from many files. See --set-section-flags for a list of "
+         "supported flags">,
+      MetaVarName<"filename">;
+
 defm redefine_symbol
     : Eq<"redefine-sym", "Change the name of a symbol old to new">,
       MetaVarName<"old=new">;

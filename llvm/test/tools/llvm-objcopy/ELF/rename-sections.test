@@ -1,0 +1,71 @@
+## Test --rename-sections option
+
+# RUN: yaml2obj %s -o %t
+
+## Basic rename via file.
+# RUN: echo '.foo .bar' > %t.basic.txt
+# RUN: llvm-objcopy --rename-sections %t.basic.txt %t %t.basic
+# RUN: llvm-readobj --sections %t.basic | FileCheck %s --check-prefix=BASIC
+
+## Rename with a flag applied.
+# RUN: echo '.foo .bar,code' > %t.flag.txt
+# RUN: llvm-objcopy --rename-sections %t.flag.txt %t %t.flag
+# RUN: llvm-readobj --sections %t.flag | FileCheck %s --check-prefix=FLAG
+
+## Comments and blank lines are ignored.
+# RUN: printf '# this is a comment\n\n  .foo   .bar  # inline comment\n' > %t.comments.txt
+# RUN: llvm-objcopy --rename-sections %t.comments.txt %t %t.comments
+# RUN: llvm-readobj --sections %t.comments | FileCheck %s --check-prefix=BASIC
+
+## Two files are applied in order; both rules take effect.
+# RUN: echo '.foo .bar' > %t.multi1.txt
+# RUN: echo '.data .newdata' > %t.multi2.txt
+# RUN: llvm-objcopy --rename-sections %t.multi1.txt --rename-sections %t.multi2.txt %t %t.multi
+# RUN: llvm-readobj --sections %t.multi | FileCheck %s --check-prefixes=BASIC,MULTI
+
+## Renames don't chain: .foo->.bar and .bar->.baz leaves .foo as .bar.
+# RUN: echo '.foo .bar' > %t.chain1.txt
+# RUN: echo '.bar .baz' > %t.chain2.txt
+# RUN: llvm-objcopy --rename-sections %t.chain1.txt --rename-sections %t.chain2.txt %t %t.chain
+# RUN: llvm-readobj --sections %t.chain | FileCheck %s --check-prefix=CHAIN
+
+# BASIC:      Name: .bar
+# FLAG:       Name: .bar
+# FLAG:       SHF_EXECINSTR
+# MULTI:      Name: .newdata
+# CHAIN:      Name: .bar
+# CHAIN-NOT:  Name: .baz
+
+## Error cases.
+
+# RUN: echo '  .text   .foo #rename section  ' > %t.rename-sections.txt
+# RUN: echo '.text' >> %t.rename-sections.txt
+# RUN: not llvm-objcopy --rename-sections %t.rename-sections.txt %t /dev/null 2>&1 | FileCheck %s --check-prefix=BAD-RENAME-SECTIONS-FORMAT
+# BAD-RENAME-SECTIONS-FORMAT: bad format for --rename-sections: missing ' '
+
+# RUN: echo '.text .foo' > %t.rename-sections-1.txt
+# RUN: echo '.text .bar' > %t.rename-sections-2.txt
+# RUN: not llvm-objcopy --rename-sections %t.rename-sections-1.txt --rename-sections %t.rename-sections-2.txt %t /dev/null 2>&1 | FileCheck %s --check-prefix=MULTIPLE-SECTION-RENAMES
+# MULTIPLE-SECTION-RENAMES: multiple renames of section '.text'
+
+# RUN: not llvm-objcopy --rename-sections %t.rename-sections-none.txt %t /dev/null 2>&1 | FileCheck -DMSG=%errc_ENOENT %s --check-prefix=NO-SECTION-FILE
+# NO-SECTION-FILE: error: '{{.*}}.rename-sections-none.txt': [[MSG]]
+
+!ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_X86_64
+Sections:
+  - Name:  .foo
+    Type:  SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: "c3c3c3c3"
+  - Name:  .data
+    Type:  SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    Content: "deadbeef"
+  - Name:  .text
+    Type:  SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]

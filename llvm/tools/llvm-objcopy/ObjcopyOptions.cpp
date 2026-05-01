@@ -229,6 +229,33 @@ static Expected<SectionRename> parseRenameSectionValue(StringRef FlagValue) {
   return SR;
 }
 
+static Expected<SectionRename> parseRenameSectionsValue(StringRef FlagValue) {
+  if (!FlagValue.contains(' '))
+    return createStringError(errc::invalid_argument,
+                             "bad format for --rename-sections: missing ' '");
+
+  // Initial split: ".foo" ".bar,f1,f2,..."
+  auto Old2New = FlagValue.split(' ');
+  SectionRename SR;
+  SR.OriginalName = Old2New.first;
+
+  // Flags split: ".bar" "f1" "f2" ...
+  SmallVector<StringRef, 6> NameAndFlags;
+  // trim() handles superfluous whitespace
+  Old2New.second.trim().split(NameAndFlags, ',');
+  SR.NewName = NameAndFlags[0];
+
+  if (NameAndFlags.size() > 1) {
+    Expected<SectionFlag> ParsedFlagSet =
+        parseSectionFlagSet(ArrayRef(NameAndFlags).drop_front());
+    if (!ParsedFlagSet)
+      return ParsedFlagSet.takeError();
+    SR.NewFlags = *ParsedFlagSet;
+  }
+
+  return SR;
+}
+
 static Expected<std::pair<StringRef, uint64_t>>
 parseSetSectionAttribute(StringRef Option, StringRef FlagValue) {
   if (!FlagValue.contains('='))
@@ -379,6 +406,34 @@ static Error addSymbolsFromFile(NameMatcher &Symbols, BumpPtrAllocator &Alloc,
         return E;
   }
 
+  return Error::success();
+}
+
+static Error
+addSectionsToRenameFromFile(StringMap<SectionRename> &SectionsToRename,
+                            BumpPtrAllocator &Alloc, StringRef Filename) {
+  StringSaver Saver(Alloc);
+  SmallVector<StringRef, 16> Lines;
+  auto BufOrErr = MemoryBuffer::getFile(Filename);
+  if (!BufOrErr)
+    return createFileError(Filename, BufOrErr.getError());
+
+  BufOrErr.get()->getBuffer().split(Lines, '\n');
+  size_t NumLines = Lines.size();
+  for (size_t LineNo = 0; LineNo < NumLines; ++LineNo) {
+    StringRef TrimmedLine = Lines[LineNo].split('#').first.trim();
+    if (TrimmedLine.empty())
+      continue;
+
+    Expected<SectionRename> SR =
+        parseRenameSectionsValue(Saver.save(TrimmedLine));
+    if (!SR)
+      return SR.takeError();
+    if (!SectionsToRename.try_emplace(SR->OriginalName, *SR).second)
+      return createStringError(
+          errc::invalid_argument, "%s:%zu: multiple renames of section '%s'",
+          Filename.str().c_str(), LineNo + 1, SR->OriginalName.str().c_str());
+  }
   return Error::success();
 }
 
@@ -1011,6 +1066,11 @@ objcopy::parseObjcopyOptions(ArrayRef<const char *> ArgsArr,
                                "multiple renames of section '%s'",
                                SR->OriginalName.str().c_str());
   }
+  for (auto *Arg : InputArgs.filtered(OBJCOPY_rename_sections))
+    if (Error E = addSectionsToRenameFromFile(Config.SectionsToRename, DC.Alloc,
+                                              Arg->getValue()))
+      return std::move(E);
+
   for (auto *Arg : InputArgs.filtered(OBJCOPY_set_section_alignment)) {
     Expected<std::pair<StringRef, uint64_t>> NameAndAlign =
         parseSetSectionAttribute("--set-section-alignment", Arg->getValue());
