@@ -215,6 +215,17 @@ bool HexagonTargetObjectFile::isGlobalInSmallSection(const GlobalObject *GO,
   // small data or not. This is how we can support mixing -G0/-G8 in LTO.
   if (GVar->hasSection()) {
     bool IsSmall = isSmallDataSection(GVar->getSection());
+    // A definition of the exclude or metadata section kind is never small
+    // data: selectSmallSectionForGlobal has no section for these kinds.
+    // getKindForGlobal only accepts emitted definitions, so the section name
+    // alone decides for a declaration or an available_externally global.
+    if (IsSmall && !GVar->isDeclarationForLinker()) {
+      SectionKind Kind = getKindForGlobal(GVar, TM);
+      if (Kind.isExclude() || Kind.isMetadata()) {
+        LLVM_DEBUG(dbgs() << "no, has exclude or metadata section kind\n");
+        return false;
+      }
+    }
     LLVM_DEBUG(dbgs() << (IsSmall ? "yes" : "no")
                       << ", has section: " << GVar->getSection() << '\n');
     return IsSmall;
