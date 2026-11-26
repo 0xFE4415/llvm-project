@@ -41,6 +41,7 @@ FunctionPass *createARMISelDag(ARMBaseTargetMachine &TM,
 FunctionPass *createA15SDOptimizerPass();
 FunctionPass *createARMLoadStoreOptLegacyPass(bool PreAlloc = false);
 FunctionPass *createARMExpandPseudoPass();
+FunctionPass *createARMAvoidTrailingCallPass();
 FunctionPass *createARMBranchTargetsPass();
 FunctionPass *createARMConstantIslandPass();
 FunctionPass *createMLxExpansionPass();
@@ -63,6 +64,7 @@ void LowerARMMachineInstrToMCInst(const MachineInstr *MI, MCInst &OutMI,
                                   ARMAsmPrinter &AP);
 
 void initializeARMAsmPrinterPass(PassRegistry &);
+void initializeARMAvoidTrailingCallPass(PassRegistry &);
 void initializeARMBlockPlacementPass(PassRegistry &);
 void initializeARMBranchTargetsPass(PassRegistry &);
 void initializeARMConstantIslandsPass(PassRegistry &);
@@ -83,13 +85,13 @@ void initializeThumb2ITBlockPass(PassRegistry &);
 void initializeThumb2SizeReducePass(PassRegistry &);
 
 class ARMPreAllocLoadStoreOptPass
-    : public PassInfoMixin<ARMPreAllocLoadStoreOptPass> {
+    : public OptionalPassInfoMixin<ARMPreAllocLoadStoreOptPass> {
 public:
   PreservedAnalyses run(MachineFunction &MF,
                         MachineFunctionAnalysisManager &MFAM);
 };
 
-class ARMLoadStoreOptPass : public PassInfoMixin<ARMLoadStoreOptPass> {
+class ARMLoadStoreOptPass : public OptionalPassInfoMixin<ARMLoadStoreOptPass> {
 public:
   PreservedAnalyses run(MachineFunction &MF,
                         MachineFunctionAnalysisManager &MFAM);

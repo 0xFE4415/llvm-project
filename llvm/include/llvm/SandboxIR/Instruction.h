@@ -46,7 +46,11 @@ public:
 #define OP(OPC) OPC,
 #define OPCODES(...) __VA_ARGS__
 #define DEF_INSTR(ID, OPC, CLASS) OPC
-#include "llvm/SandboxIR/Values.def"
+#define DEF_DISABLE_AUTO_UNDEF // ValuesDefFilesList.def includes multiple .def
+#include "llvm/SandboxIR/ValuesDefFilesList.def"
+#undef OP
+#undef OPCODES
+#undef DEF_INSTR
   };
 
 protected:
@@ -100,20 +104,29 @@ protected:
 
   /// Helper function for create(). It sets the builder's insert position
   /// according to \p Pos.
-  static IRBuilder<> &setInsertPos(InsertPosition Pos) {
-    auto *WhereBB = Pos.getBasicBlock();
-    auto WhereIt = Pos.getIterator();
-    auto &Ctx = WhereBB->getContext();
-    auto &Builder = Ctx.getLLVMIRBuilder();
-    if (WhereIt != WhereBB->end())
-      Builder.SetInsertPoint((*Pos).getTopmostLLVMInstruction());
-    else
-      Builder.SetInsertPoint(cast<llvm::BasicBlock>(WhereBB->Val));
-    return Builder;
-  }
+  LLVM_ABI static IRBuilder<> &setInsertPos(InsertPosition Pos);
+
+#ifndef NDEBUG
+  /// A common hash calculation based on the instruction opcode and its operands
+  hash_code hashHelper() const { return hash_combine(Opc, User::hashHelper()); }
+#endif
 
 public:
-  LLVM_ABI static const char *getOpcodeName(Opcode Opc);
+  static const char *getOpcodeName(Opcode Opc) {
+    switch (Opc) {
+#define OP(OPC)                                                                \
+  case Opcode::OPC:                                                            \
+    return #OPC;
+#define OPCODES(...) __VA_ARGS__
+#define DEF_INSTR(ID, OPC, CLASS) OPC
+#define DEF_DISABLE_AUTO_UNDEF // ValuesDefFilesList.def includes multiple .def
+#include "llvm/SandboxIR/ValuesDefFilesList.def"
+#undef OPCODES
+#undef DEF_INSTR
+    }
+    llvm_unreachable("Unknown Opcode");
+  }
+
   /// This is used by BasicBlock::iterator.
   virtual unsigned getNumOfIRInstrs() const = 0;
   /// \Returns a BasicBlock::iterator for this Instruction.
@@ -370,6 +383,10 @@ public:
 
 #ifndef NDEBUG
   void dumpOS(raw_ostream &OS) const override;
+
+  // TODO: This hash function does not capture the full state of several
+  // subclasses. So we need to implement subclass specific overrides.
+  hash_code hash() const final { return Instruction::hashHelper(); }
 #endif
 };
 
@@ -1079,8 +1096,8 @@ class UncondBrInst : public SingleLLVMInstructionImpl<llvm::UncondBrInst>,
   friend Context; // for UncondBrInst()
 
 public:
-  static UncondBrInst *create(BasicBlock *Target, InsertPosition InsertBefore,
-                              Context &Ctx);
+  LLVM_ABI static UncondBrInst *
+  create(BasicBlock *Target, InsertPosition InsertBefore, Context &Ctx);
   LLVM_ABI BasicBlock *getSuccessor() const;
   LLVM_ABI void setSuccessor(BasicBlock *NewSucc);
   unsigned getNumSuccessors() const { return 1; }
@@ -1105,11 +1122,11 @@ class CondBrInst : public SingleLLVMInstructionImpl<llvm::CondBrInst>,
   friend Context; // for UcnondBrInst()
 
 public:
-  static CondBrInst *create(Value *Cond, BasicBlock *IfTrue,
-                            BasicBlock *IfFalse, InsertPosition InsertBefore,
-                            Context &Ctx);
+  LLVM_ABI static CondBrInst *create(Value *Cond, BasicBlock *IfTrue,
+                                     BasicBlock *IfFalse,
+                                     InsertPosition InsertBefore, Context &Ctx);
   LLVM_ABI Value *getCondition() const;
-  void setCondition(Value *V);
+  LLVM_ABI void setCondition(Value *V);
   LLVM_ABI BasicBlock *getSuccessor(unsigned SuccIdx) const;
   LLVM_ABI void setSuccessor(unsigned Idx, BasicBlock *NewSucc);
   unsigned getNumSuccessors() const { return 2; }
@@ -1949,8 +1966,8 @@ public:
   public:
     CaseHandleImpl(Context &Ctx, LLVMCaseItT LLVMCaseIt)
         : Ctx(Ctx), LLVMCaseIt(LLVMCaseIt) {}
-    LLVM_ABI_FOR_TEST ConstT *getCaseValue() const;
-    LLVM_ABI_FOR_TEST BlockT *getCaseSuccessor() const;
+    LLVM_ABI ConstT *getCaseValue() const;
+    LLVM_ABI BlockT *getCaseSuccessor() const;
     unsigned getCaseIndex() const {
       const auto &LLVMCaseHandle = *LLVMCaseIt;
       return LLVMCaseHandle.getCaseIndex();
@@ -2609,9 +2626,6 @@ protected:
   CmpInst(llvm::CmpInst *CI, Context &Ctx, ClassID Id, Opcode Opc)
       : SingleLLVMInstructionImpl(Id, Opc, CI, Ctx) {}
   friend Context; // for CmpInst()
-  LLVM_ABI static Value *createCommon(Value *Cond, Value *True, Value *False,
-                                      const Twine &Name, IRBuilder<> &Builder,
-                                      Context &Ctx);
 
 public:
   using Predicate = llvm::CmpInst::Predicate;
@@ -2758,6 +2772,15 @@ inline unsigned getLoadStoreAddressSpace(const Instruction *I) {
   if (auto *LI = dyn_cast<LoadInst>(I))
     return LI->getPointerAddressSpace();
   return cast<StoreInst>(I)->getPointerAddressSpace();
+}
+
+/// A helper function that returns the alignment of load or store instruction.
+inline Align getLoadStoreAlignment(const Value *I) {
+  assert((isa<LoadInst>(I) || isa<StoreInst>(I)) &&
+         "Expected Load or Store instruction");
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    return LI->getAlign();
+  return cast<StoreInst>(I)->getAlign();
 }
 
 } // namespace llvm::sandboxir

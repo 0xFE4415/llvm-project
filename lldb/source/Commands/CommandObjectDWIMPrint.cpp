@@ -34,7 +34,8 @@ CommandObjectDWIMPrint::CommandObjectDWIMPrint(CommandInterpreter &interpreter)
     : CommandObjectRaw(interpreter, "dwim-print",
                        "Print a variable or expression.",
                        "dwim-print [<variable-name> | <expression>]",
-                       eCommandProcessMustBePaused | eCommandTryTargetAPILock) {
+                       eCommandProcessMustBePaused | eCommandTryTargetAPILock |
+                           eCommandAllowsDummyTarget) {
 
   AddSimpleArgumentList(eArgTypeVarName);
 
@@ -44,6 +45,7 @@ CommandObjectDWIMPrint::CommandObjectDWIMPrint(CommandInterpreter &interpreter)
                         LLDB_OPT_SET_1);
   StringRef exclude_expr_options[] = {"debug", "top-level"};
   m_option_group.Append(&m_expr_options, exclude_expr_options);
+  m_expr_options.AppendLanguageOptions(m_option_group);
   m_option_group.Append(&m_varobj_options, LLDB_OPT_SET_ALL, LLDB_OPT_SET_1);
   m_option_group.Finalize();
 }
@@ -108,23 +110,23 @@ void CommandObjectDWIMPrint::DoExecute(StringRef command,
     // Objective-C
     // "<Name: 0x...>. The regex is:
     // - Start with "<".
-    // - Followed by 1 or more non-whitespace characters.
+    // - Capture 1 or more non-whitespace characters (the class name).
     // - Followed by ": 0x".
     // - Followed by 5 or more hex digits.
     // - Followed by ">".
     // - End with zero or more whitespace characters.
     static const std::regex swift_class_regex(
-        "^<\\S+: 0x[[:xdigit:]]{5,}>\\s*$");
+        "^<(\\S+): 0x[[:xdigit:]]{5,}>\\s*$");
 
+    std::cmatch match;
     if (GetDebugger().GetShowDontUsePoHint() && !target.IsDummyTarget() &&
         (language.AsLanguageType() == lldb::eLanguageTypeSwift ||
          language.IsObjC()) &&
-        std::regex_match(output.data(), swift_class_regex)) {
+        std::regex_match(output.data(), match, swift_class_regex)) {
 
-      result.AppendNote(
-          "object description requested, but type doesn't implement "
-          "a custom object description. Consider using \"p\" instead of "
-          "\"po\" (this note will only be shown once per debug session)");
+      result.AppendNoteWithFormatv(
+          "{0} has no custom object description, use \"p\" to see its children",
+          match[1].str());
       note_shown = true;
     }
   };
@@ -155,15 +157,7 @@ void CommandObjectDWIMPrint::DoExecute(StringRef command,
 
   // First, try `expr` as a _limited_ frame variable expression path: only the
   // dot operator (`.`) is permitted for this case.
-  //
-  // This is limited to support only unambiguous expression paths. Of note,
-  // expression paths are not attempted if the expression contain either the
-  // arrow operator (`->`) or the subscript operator (`[]`). This is because
-  // both operators can be overloaded in C++, and could result in ambiguity in
-  // how the expression is handled. Additionally, `*` and `&` are not supported.
-  const bool try_variable_path =
-      expr.find_first_of("*&->[]") == StringRef::npos;
-  if (frame && try_variable_path) {
+  if (frame) {
     VariableSP var_sp;
     Status status;
     auto valobj_sp = frame->GetValueForVariableExpressionPath(
@@ -238,6 +232,11 @@ void CommandObjectDWIMPrint::DoExecute(StringRef command,
       else
         result.AppendErrorWithFormatv(
             "unknown error evaluating expression `{0}`", expr);
+      // A setup or parse error can be a bug in the evaluator. Any other failure
+      // happens once the expression runs.
+      if (expr_result == eExpressionSetupError ||
+          expr_result == eExpressionParseError)
+        GetDebugger().SuggestBugReport(expr, result.GetErrorStream());
       return;
     }
 

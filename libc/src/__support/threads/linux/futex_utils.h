@@ -1,9 +1,14 @@
-//===--- Futex Wrapper ------------------------------------------*- C++ -*-===//
+//===----------------------------------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+//===----------------------------------------------------------------------===//
+///
+/// \file
+/// Wrapper around a futex word.
+///
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_LIBC_SRC___SUPPORT_THREADS_LINUX_FUTEX_UTILS_H
@@ -20,8 +25,23 @@
 #include "src/__support/time/abs_timeout.h"
 #include <linux/errno.h>
 #include <linux/futex.h>
+#if defined(SYS_futex_time64)
+#include <linux/time_types.h>
+#endif
 
 namespace LIBC_NAMESPACE_DECL {
+
+#if !defined(SYS_futex_time64) && defined(SYS_futex)
+static_assert(
+    sizeof(timespec::tv_nsec) == sizeof(long),
+    "This legacy syscall fallback is only safe on platforms where tv_nsec "
+    "matches the register size (long). It is unsafe on 32-bit platforms "
+    "with 64-bit tv_nsec.");
+#endif
+
+// What wait() does when a signal handler interrupts the futex wait.
+enum class FutexSigAction { Restart, Exit };
+
 class Futex : public cpp::Atomic<FutexWordType> {
 public:
   using Timeout = internal::AbsTimeout;
@@ -31,9 +51,10 @@ public:
     cpp::Atomic<FutexWordType>::store(value);
     return *this;
   }
-  LIBC_INLINE ErrorOr<int> wait(FutexWordType expected,
-                                cpp::optional<Timeout> timeout = cpp::nullopt,
-                                bool is_shared = false) {
+  LIBC_INLINE ErrorOr<int>
+  wait(FutexWordType expected, cpp::optional<Timeout> timeout = cpp::nullopt,
+       bool is_shared = false,
+       FutexSigAction sig_action = FutexSigAction::Restart) {
     // use bitset variants to enforce abs_time
     uint32_t op = is_shared ? FUTEX_WAIT_BITSET : FUTEX_WAIT_BITSET_PRIVATE;
     if (timeout && timeout->is_realtime()) {
@@ -43,19 +64,52 @@ public:
       if (this->load(cpp::MemoryOrder::RELAXED) != expected)
         return 0;
 
+      void *timeout_ptr = nullptr;
+#if defined(SYS_futex_time64)
+      __kernel_timespec ts64;
+      if (timeout) {
+        // If timespec has the same size and layout as __kernel_timespec, we can
+        // pass a pointer to it directly.
+        if constexpr (sizeof(timespec) == sizeof(__kernel_timespec)) {
+          timeout_ptr = const_cast<timespec *>(&timeout->get_timespec());
+        } else {
+          // Otherwise (e.g. 32-bit platforms with 32-bit time_t), the 64-bit
+          // futex syscall (SYS_futex_time64) still expects a 64-bit timespec.
+          // We must convert it to avoid passing a mismatching structure size.
+          ts64.tv_sec = timeout->get_timespec().tv_sec;
+          ts64.tv_nsec = timeout->get_timespec().tv_nsec;
+          timeout_ptr = &ts64;
+        }
+      }
+#else
+      timespec ts;
+      if (timeout) {
+        ts = timeout->get_timespec();
+        timeout_ptr = &ts;
+      }
+#endif
+
       int ret = syscall_impl<int>(
           /*syscall_number=*/FUTEX_SYSCALL_ID,
           /*futex_addr=*/this,
           /*op=*/op,
           /*expected=*/expected,
-          /*timeout=*/timeout ? &timeout->get_timespec() : nullptr,
+          /*timeout=*/timeout_ptr,
           /*ignored=*/nullptr,
           /*bitset=*/FUTEX_BITSET_MATCH_ANY);
 
-      // continue waiting if interrupted; otherwise return the result
-      // which should normally be 0 or -ETIMEOUT.
-      if (ret == -EINTR)
-        continue;
+      // continue waiting if interrupted, unless the caller asks to be notified;
+      // otherwise return the result which should normally be 0 or -ETIMEOUT.
+      if (ret == -EINTR) {
+        if (sig_action == FutexSigAction::Restart)
+          continue;
+        return cpp::unexpected(EINTR);
+      }
+
+      // EAGAIN and EWOULDBLOCK will be treated as a normal finish, as the value
+      // has changed.
+      if (ret == -EAGAIN || ret == -EWOULDBLOCK)
+        return 0;
 
       if (ret < 0)
         return cpp::unexpected(-ret);
@@ -84,6 +138,28 @@ public:
         /*ignored=*/nullptr,
         /*ignored=*/nullptr,
         /*ignored=*/0);
+    if (ret < 0)
+      return cpp::unexpected(-ret);
+    return ret;
+  }
+  // Atomically store |value| and wake all waiters. Unlike store() followed by
+  // notify_all(), the kernel does both while holding the futex queue lock, so
+  // the caller never touches the futex after another thread can observe
+  // |value|. Use this when a waiter may free the futex as soon as it sees the
+  // new value. |value| is a uint8_t because FUTEX_OP_SET's operand is a
+  // sign-extended 12-bit field.
+  LIBC_INLINE ErrorOr<int> store_and_notify_all(uint8_t value,
+                                                bool is_shared = false) {
+    int ret = syscall_impl<int>(
+        /*syscall_number=*/FUTEX_SYSCALL_ID,
+        /*futex_addr=*/this,
+        /*op=*/is_shared ? FUTEX_WAKE_OP : FUTEX_WAKE_OP_PRIVATE,
+        /*wake_limit=*/cpp::numeric_limits<int>::max(),
+        /*wake_limit2=*/0,
+        /*futex_addr2=*/this,
+        // The conditional second wake targets the same futex, which has no
+        // waiters left by then.
+        /*encoded_op=*/FUTEX_OP(FUTEX_OP_SET, value, FUTEX_OP_CMP_EQ, 0));
     if (ret < 0)
       return cpp::unexpected(-ret);
     return ret;

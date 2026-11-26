@@ -8,20 +8,9 @@
 
 #include "llvm/SandboxIR/Instruction.h"
 #include "llvm/SandboxIR/Function.h"
+#include "llvm/SandboxIR/Module.h"
 
 namespace llvm::sandboxir {
-
-const char *Instruction::getOpcodeName(Opcode Opc) {
-  switch (Opc) {
-#define OP(OPC)                                                                \
-  case Opcode::OPC:                                                            \
-    return #OPC;
-#define OPCODES(...) __VA_ARGS__
-#define DEF_INSTR(ID, OPC, CLASS) OPC
-#include "llvm/SandboxIR/Values.def"
-  }
-  llvm_unreachable("Unknown Opcode");
-}
 
 llvm::Instruction *Instruction::getTopmostLLVMInstruction() const {
   Instruction *Prev = getPrevNode();
@@ -167,12 +156,24 @@ BasicBlock *Instruction::getParent() const {
   return cast<BasicBlock>(Ctx.getValue(BB));
 }
 
+IRBuilder<> &Instruction::setInsertPos(InsertPosition Pos) {
+  auto *WhereBB = Pos.getBasicBlock();
+  auto WhereIt = Pos.getIterator();
+  auto &Builder = WhereBB->getParent()->getParent()->getLLVMIRBuilder();
+  if (WhereIt != WhereBB->end())
+    Builder.SetInsertPoint((*Pos).getTopmostLLVMInstruction());
+  else
+    Builder.SetInsertPoint(cast<llvm::BasicBlock>(WhereBB->Val));
+  return Builder;
+}
+
 bool Instruction::classof(const sandboxir::Value *From) {
   switch (From->getSubclassID()) {
 #define DEF_INSTR(ID, OPC, CLASS)                                              \
   case ClassID::ID:                                                            \
     return true;
-#include "llvm/SandboxIR/Values.def"
+#define DEF_DISABLE_AUTO_UNDEF // ValuesDefFilesList.def includes multiple .def
+#include "llvm/SandboxIR/ValuesDefFilesList.def"
   default:
     return false;
   }

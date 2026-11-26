@@ -18,6 +18,12 @@ func.func private @array_type_stride(!spirv.array< 4 x !spirv.array<4 x f32, str
 // CHECK: func private @vector_array_type_bf16(!spirv.array<32 x vector<4xbf16>>)
 func.func private @vector_array_type_bf16(!spirv.array<32 x vector<4xbf16> >) -> ()
 
+// CHECK: func private @scalar_array_type_f64(!spirv.array<16 x f16>, !spirv.array<16 x f64>)
+func.func private @scalar_array_type_f64(!spirv.array<16xf16>, !spirv.array<16xf64>) -> ()
+
+// CHECK: func private @scalar_array_type_f8(!spirv.array<16 x f8E4M3FN>, !spirv.array<16 x f8E5M2>)
+func.func private @scalar_array_type_f8(!spirv.array<16xf8E4M3FN>, !spirv.array<16xf8E5M2>) -> ()
+
 // -----
 
 // expected-error @+1 {{expected '<'}}
@@ -65,6 +71,16 @@ func.func private @i256_type(!spirv.array<4xi256>) -> ()
 
 // -----
 
+// expected-error @+1 {{only 8/16/32/64-bit float type allowed but found 'f80'}}
+func.func private @f80_type(!spirv.array<4xf80>) -> ()
+
+// -----
+
+// expected-error @+1 {{only 8/16/32/64-bit float type allowed but found 'f128'}}
+func.func private @f128_type(!spirv.array<4xf128>) -> ()
+
+// -----
+
 // expected-error @+1 {{cannot use 'index' to compose SPIR-V types}}
 func.func private @index_type(!spirv.array<4xindex>) -> ()
 
@@ -98,6 +114,12 @@ func.func private @scalar_ptr_type(!spirv.ptr<f32, Uniform>) -> ()
 // CHECK: @vector_ptr_type(!spirv.ptr<vector<4xi32>, PushConstant>)
 func.func private @vector_ptr_type(!spirv.ptr<vector<4xi32>,PushConstant>) -> ()
 
+// CHECK: @function_ptr_type(!spirv.ptr<(i32, f32) -> i32, CodeSectionINTEL>)
+func.func private @function_ptr_type(!spirv.ptr<(i32, f32) -> i32, CodeSectionINTEL>) -> ()
+
+// CHECK: @void_function_ptr_type(!spirv.ptr<() -> (), Function>)
+func.func private @void_function_ptr_type(!spirv.ptr<() -> (), Function>) -> ()
+
 // -----
 
 // expected-error @+1 {{expected '<'}}
@@ -127,6 +149,36 @@ func.func private @invalid_ptr_to_vector_one_element(!spirv.ptr<vector<1xi32>, S
 
 // expected-error @+1 {{vector element type must be a SPIR-V scalar type}}
 func.func private @invalid_ptr_to_vector_index(!spirv.ptr<vector<2xindex>, SomeStorageClass>) -> ()
+
+// -----
+
+// expected-error @+1 {{function type must have at most one result}}
+func.func private @function_ptr_multiple_results(!spirv.ptr<() -> (i32, i32), Function>) -> ()
+
+// -----
+
+// expected-error @+1 {{cannot use 'index' to compose SPIR-V types}}
+func.func private @function_ptr_invalid_input(!spirv.ptr<(index) -> (), Function>) -> ()
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// UntypedPointerType
+//===----------------------------------------------------------------------===//
+
+// CHECK: @untyped_ptr_type(!spirv.untyped_ptr<CrossWorkgroup>)
+func.func private @untyped_ptr_type(!spirv.untyped_ptr<CrossWorkgroup>) -> ()
+
+// CHECK: @untyped_ptr_array_type(!spirv.array<4 x !spirv.untyped_ptr<Function>>)
+func.func private @untyped_ptr_array_type(!spirv.array<4 x !spirv.untyped_ptr<Function>>) -> ()
+
+// CHECK: @untyped_ptr_struct_type(!spirv.struct<(i32, !spirv.untyped_ptr<Workgroup>)>)
+func.func private @untyped_ptr_struct_type(!spirv.struct<(i32, !spirv.untyped_ptr<Workgroup>)>) -> ()
+
+// -----
+
+// expected-error @+1 {{unknown storage class: SomeStorageClass}}
+func.func private @untyped_ptr_unknown_storage_class(!spirv.untyped_ptr<SomeStorageClass>) -> ()
 
 // -----
 

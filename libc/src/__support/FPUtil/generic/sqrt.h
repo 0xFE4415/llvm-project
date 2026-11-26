@@ -41,8 +41,8 @@ template <> struct SpecialLongDouble<long double> {
 #endif // LIBC_TYPES_LONG_DOUBLE_IS_X86_FLOAT80
 
 template <typename T>
-LIBC_INLINE void normalize(int &exponent,
-                           typename FPBits<T>::StorageType &mantissa) {
+LIBC_INLINE constexpr void
+normalize(int &exponent, typename FPBits<T>::StorageType &mantissa) {
   const int shift =
       cpp::countl_zero(mantissa) -
       (8 * static_cast<int>(sizeof(mantissa)) - 1 - FPBits<T>::FRACTION_LEN);
@@ -52,12 +52,14 @@ LIBC_INLINE void normalize(int &exponent,
 
 #ifdef LIBC_TYPES_LONG_DOUBLE_IS_FLOAT64
 template <>
-LIBC_INLINE void normalize<long double>(int &exponent, uint64_t &mantissa) {
+LIBC_INLINE constexpr void normalize<long double>(int &exponent,
+                                                  uint64_t &mantissa) {
   normalize<double>(exponent, mantissa);
 }
 #elif defined(LIBC_TYPES_LONG_DOUBLE_IS_FLOAT128)
 template <>
-LIBC_INLINE void normalize<long double>(int &exponent, UInt128 &mantissa) {
+LIBC_INLINE constexpr void normalize<long double>(int &exponent,
+                                                  UInt128 &mantissa) {
   const uint64_t hi_bits = static_cast<uint64_t>(mantissa >> 64);
   const int shift =
       hi_bits ? (cpp::countl_zero(hi_bits) - 15)
@@ -69,16 +71,18 @@ LIBC_INLINE void normalize<long double>(int &exponent, UInt128 &mantissa) {
 
 } // namespace internal
 
+namespace generic {
+
 // Correctly rounded IEEE 754 SQRT for all rounding modes.
 // Shift-and-add algorithm.
 template <typename OutType, typename InType>
-LIBC_INLINE static constexpr cpp::enable_if_t<
+LIBC_INLINE LIBC_CONSTEXPR_DEFAULT static cpp::enable_if_t<
     cpp::is_floating_point_v<OutType> && cpp::is_floating_point_v<InType> &&
         sizeof(OutType) <= sizeof(InType),
     OutType>
 sqrt(InType x) {
-  if constexpr (internal::SpecialLongDouble<OutType>::VALUE &&
-                internal::SpecialLongDouble<InType>::VALUE) {
+  if constexpr (fputil::internal::SpecialLongDouble<OutType>::VALUE &&
+                fputil::internal::SpecialLongDouble<InType>::VALUE) {
 #ifdef LIBC_TYPES_LONG_DOUBLE_IS_X86_FLOAT80
     // Special 80-bit long double.
     return x86::sqrt(x);
@@ -92,7 +96,7 @@ sqrt(InType x) {
         DyadicFloat<cpp::bit_ceil(static_cast<size_t>(InFPBits::STORAGE_LEN))>;
 
     constexpr InStorageType ONE = InStorageType(1) << InFPBits::FRACTION_LEN;
-    constexpr auto FLT_NAN = OutFPBits::quiet_nan().get_val();
+    LIBC_BIT_CAST_CONSTEXPR_VAR auto FLT_NAN = OutFPBits::quiet_nan().get_val();
 
     InFPBits bits(x);
 
@@ -114,7 +118,7 @@ sqrt(InType x) {
       // Step 1a: Normalize denormal input and append hidden bit to the mantissa
       if (bits.is_subnormal()) {
         ++x_exp; // let x_exp be the correct exponent of ONE bit.
-        internal::normalize<InType>(x_exp, x_mant);
+        fputil::internal::normalize<InType>(x_exp, x_mant);
       } else {
         x_mant |= ONE;
       }
@@ -168,6 +172,20 @@ sqrt(InType x) {
       return yd.template as<OutType, /*ShouldSignalExceptions=*/true>();
     }
   }
+}
+
+} // namespace generic
+
+// Targets with a square root instruction specialize this for the supported
+// types in the target specific headers, dispatching to generic::sqrt during
+// constant evaluation.
+template <typename OutType, typename InType>
+LIBC_INLINE constexpr cpp::enable_if_t<cpp::is_floating_point_v<OutType> &&
+                                           cpp::is_floating_point_v<InType> &&
+                                           sizeof(OutType) <= sizeof(InType),
+                                       OutType>
+sqrt(InType x) {
+  return generic::sqrt<OutType>(x);
 }
 
 } // namespace fputil

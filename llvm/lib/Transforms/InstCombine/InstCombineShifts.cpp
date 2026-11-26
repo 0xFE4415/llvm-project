@@ -14,11 +14,16 @@
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/ProfDataUtils.h"
 #include "llvm/Transforms/InstCombine/InstCombiner.h"
 using namespace llvm;
 using namespace PatternMatch;
 
 #define DEBUG_TYPE "instcombine"
+
+namespace llvm {
+extern cl::opt<bool> ProfcheckDisableMetadataFixes;
+}
 
 bool canTryToConstantAddTwoShiftAmounts(Value *Sh0, Value *ShAmt0, Value *Sh1,
                                         Value *ShAmt1) {
@@ -575,7 +580,7 @@ Instruction *InstCombinerImpl::commonShiftTransforms(BinaryOperator &I) {
 static bool canEvaluateShiftedShift(unsigned OuterShAmt, bool IsOuterShl,
                                     ShiftSemantics Semantics,
                                     Instruction *InnerShift,
-                                    InstCombinerImpl &IC, Instruction *CxtI) {
+                                    InstCombinerImpl &IC, Instruction *CtxI) {
   assert(InnerShift->isLogicalShift() && "Unexpected instruction type");
 
   // We need constant scalar or constant splat shifts.
@@ -612,7 +617,7 @@ static bool canEvaluateShiftedShift(unsigned OuterShAmt, bool IsOuterShl,
     unsigned MaskShift =
         IsInnerShl ? TypeWidth - InnerShAmt : InnerShAmt - OuterShAmt;
     APInt Mask = APInt::getLowBitsSet(TypeWidth, OuterShAmt) << MaskShift;
-    if (IC.MaskedValueIsZero(InnerShift->getOperand(0), Mask, CxtI))
+    if (IC.MaskedValueIsZero(InnerShift->getOperand(0), Mask, CtxI))
       return true;
   }
 
@@ -633,7 +638,7 @@ static bool canEvaluateShiftedShift(unsigned OuterShAmt, bool IsOuterShl,
 bool InstCombinerImpl::canEvaluateShifted(Value *V, unsigned NumBits,
                                           bool IsLeftShift,
                                           ShiftSemantics Semantics,
-                                          Instruction *CxtI) {
+                                          Instruction *CtxI) {
   // We can always evaluate immediate constants shifted left. For right shifts,
   // the constant must be a multiple of 2^NumBits to avoid losing information.
   if (match(V, m_ImmConstant())) {
@@ -666,7 +671,7 @@ bool InstCombinerImpl::canEvaluateShifted(Value *V, unsigned NumBits,
   case Instruction::Shl:
   case Instruction::LShr:
     return canEvaluateShiftedShift(NumBits, IsLeftShift, Semantics, I, *this,
-                                   CxtI);
+                                   CtxI);
 
   case Instruction::Select: {
     SelectInst *SI = cast<SelectInst>(I);
@@ -923,6 +928,25 @@ Instruction *InstCombinerImpl::FoldShiftByConstant(Value *Op0, Constant *C1,
     return CastInst::Create(ExtOpcode, Cmp, Ty);
   }
 
+  // (ext(A) * ext(B)) >> (Width / 2)  -->  ext([su]mulh(A, B))
+  // A and B must be equally extended to double their original width.
+  // The result is sign/zero-extended for an arithmetic/logical shift.
+  Value *A, *B;
+  Instruction *ExtA, *ExtB;
+  if (!IsLeftShift && match(C1, m_SpecificIntAllowPoison(TypeBits / 2)) &&
+      match(Op0,
+            m_OneUse(m_Mul(m_Instruction(ExtA, m_ZExtOrSExt(m_Value(A))),
+                           m_Instruction(ExtB, m_ZExtOrSExt(m_Value(B)))))) &&
+      ExtA->getOpcode() == ExtB->getOpcode() && A->getType() == B->getType() &&
+      TypeBits == 2 * A->getType()->getScalarSizeInBits()) {
+    auto IID = ExtA->getOpcode() == Instruction::SExt ? Intrinsic::smulh
+                                                      : Intrinsic::umulh;
+    Value *MulHigh = Builder.CreateBinaryIntrinsic(IID, A, B);
+    auto ExtOp = I.getOpcode() == Instruction::LShr ? Instruction::ZExt
+                                                    : Instruction::SExt;
+    return CastInst::Create(ExtOp, MulHigh, Ty);
+  }
+
   const APInt *Op1C;
   if (!match(C1, m_APInt(Op1C)))
     return nullptr;
@@ -994,7 +1018,9 @@ Instruction *InstCombinerImpl::FoldShiftByConstant(Value *Op0, Constant *C1,
 
       Value *NewShift = Builder.CreateBinOp(I.getOpcode(), FalseVal, C1);
       Value *NewOp = Builder.CreateBinOp(TBO->getOpcode(), NewShift, NewRHS);
-      return SelectInst::Create(Cond, NewOp, NewShift);
+      return SelectInst::Create(
+          Cond, NewOp, NewShift, "", nullptr,
+          ProfcheckDisableMetadataFixes ? nullptr : cast<SelectInst>(Op0));
     }
   }
 
@@ -1011,7 +1037,9 @@ Instruction *InstCombinerImpl::FoldShiftByConstant(Value *Op0, Constant *C1,
 
       Value *NewShift = Builder.CreateBinOp(I.getOpcode(), TrueVal, C1);
       Value *NewOp = Builder.CreateBinOp(FBO->getOpcode(), NewShift, NewRHS);
-      return SelectInst::Create(Cond, NewShift, NewOp);
+      return SelectInst::Create(
+          Cond, NewShift, NewOp, "", nullptr,
+          ProfcheckDisableMetadataFixes ? nullptr : cast<SelectInst>(Op0));
     }
   }
 
@@ -1105,8 +1133,8 @@ static bool setShiftFlags(BinaryOperator &I, const SimplifyQuery &Q) {
       return true;
     }
     // Infer 'exact' flag if shift amount is cttz(x) on the same operand.
-    if (match(I.getOperand(1), m_Intrinsic<Intrinsic::cttz>(
-                                   m_Specific(I.getOperand(0)), m_Value()))) {
+    if (match(I.getOperand(1),
+              m_Cttz(m_Specific(I.getOperand(0)), m_Value()))) {
       I.setIsExact();
       return true;
     }
@@ -1132,7 +1160,7 @@ static bool setShiftFlags(BinaryOperator &I, const SimplifyQuery &Q) {
     if (!I.hasNoSignedWrap()) {
       if (MaxCnt < KnownAmt.countMinSignBits() ||
           MaxCnt <
-              ComputeNumSignBits(I.getOperand(0), Q.DL, Q.AC, Q.CxtI, Q.DT)) {
+              ComputeNumSignBits(I.getOperand(0), Q.DL, Q.AC, Q.CtxI, Q.DT)) {
         I.setHasNoSignedWrap();
         Changed = true;
       }
@@ -1376,11 +1404,21 @@ Instruction *InstCombinerImpl::visitShl(BinaryOperator &I) {
 
     // Canonicalize "extract lowest set bit" using cttz to and-with-negate:
     // 1 << (cttz X) --> -X & X
-    if (match(Op1,
-              m_OneUse(m_Intrinsic<Intrinsic::cttz>(m_Value(X), m_Value())))) {
+    if (match(Op1, m_OneUse(m_Cttz(m_Value(X), m_Value())))) {
       Value *NegX = Builder.CreateNeg(X, "neg");
       return BinaryOperator::CreateAnd(NegX, X);
     }
+  }
+
+  // LHS << (cttz RHS) --> (RHS & -RHS) * LHS
+  if (match(Op1, m_OneUse(m_Cttz(m_Value(X), m_Value())))) {
+    Value *NegX = Builder.CreateNeg(X, "neg");
+    Value *LowBit = Builder.CreateAnd(NegX, X);
+    auto *Mul = BinaryOperator::CreateMul(LowBit, Op0);
+    // Propagate nuw from shl if present
+    if (I.hasNoUnsignedWrap())
+      Mul->setHasNoUnsignedWrap();
+    return Mul;
   }
 
   return nullptr;
@@ -1402,6 +1440,10 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
   Value *X;
   const APInt *C;
   unsigned BitWidth = Ty->getScalarSizeInBits();
+
+  // lshr 1, X --> zext (X == 0)
+  if (match(Op0, m_One()))
+    return new ZExtInst(Builder.CreateIsNull(Op1), Ty);
 
   // (iN (~X) u>> (N - 1)) --> zext (X > -1)
   if (match(Op0, m_OneUse(m_Not(m_Value(X)))) &&
@@ -1471,6 +1513,13 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
         return NewBinOp;
       }
     }
+  }
+
+  // (X & (Y << Z)) >>u Z --> (X >>u Z) & Y
+  if (match(Op0, m_OneUse(m_c_And(m_Shl(m_Value(Y), m_Specific(Op1)),
+                                  m_Value(X))))) {
+    Value *NewLshr = Builder.CreateLShr(X, Op1);
+    return BinaryOperator::CreateAnd(NewLshr, Y);
   }
 
   if (match(Op1, m_APInt(C))) {
@@ -1559,7 +1608,9 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
       if (SrcTyBitWidth == 1) {
         auto *NewC = ConstantInt::get(
             Ty, APInt::getLowBitsSet(BitWidth, BitWidth - ShAmtC));
-        return SelectInst::Create(X, NewC, ConstantInt::getNullValue(Ty));
+        auto *SI = SelectInst::Create(X, NewC, ConstantInt::getNullValue(Ty));
+        setExplicitlyUnknownBranchWeightsIfProfiled(*SI, DEBUG_TYPE, &F);
+        return SI;
       }
 
       if ((!Ty->isIntegerTy() || shouldChangeType(Ty, X->getType())) &&
@@ -1696,18 +1747,6 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
         }
       }
     }
-
-    // Reduce add-carry of bools to logic:
-    // ((zext BoolX) + (zext BoolY)) >> 1 --> zext (BoolX && BoolY)
-    Value *BoolX, *BoolY;
-    if (ShAmtC == 1 && match(Op0, m_Add(m_Value(X), m_Value(Y))) &&
-        match(X, m_ZExt(m_Value(BoolX))) && match(Y, m_ZExt(m_Value(BoolY))) &&
-        BoolX->getType()->isIntOrIntVectorTy(1) &&
-        BoolY->getType()->isIntOrIntVectorTy(1) &&
-        (X->hasOneUse() || Y->hasOneUse() || Op0->hasOneUse())) {
-      Value *And = Builder.CreateAnd(BoolX, BoolY);
-      return new ZExtInst(And, Ty);
-    }
   }
 
   const SimplifyQuery Q = SQ.getWithInstruction(&I);
@@ -1734,7 +1773,7 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
   Value *Shl0_Op0, *Shl0_Op1, *Shl1_Op1;
   BinaryOperator *Shl1;
   if (match(Op0, m_Shl(m_Value(Shl0_Op0), m_Value(Shl0_Op1))) &&
-      match(Op1, m_Intrinsic<Intrinsic::cttz>(m_BinOp(Shl1))) &&
+      match(Op1, m_Cttz(m_BinOp(Shl1), m_Value())) &&
       match(Shl1, m_Shl(m_Specific(Shl0_Op0), m_Value(Shl1_Op1))) &&
       isKnownToBeAPowerOfTwo(Shl0_Op0, /*OrZero=*/true, &I)) {
     auto *Shl0 = cast<BinaryOperator>(Op0);
@@ -1757,10 +1796,8 @@ InstCombinerImpl::foldVariableSignZeroExtensionOfVariableHighBitExtract(
 
   // Check that constant C is a splat of the element-wise bitwidth of V.
   auto BitWidthSplat = [](Constant *C, Value *V) {
-    return match(
-        C, m_SpecificInt_ICMP(ICmpInst::Predicate::ICMP_EQ,
-                              APInt(C->getType()->getScalarSizeInBits(),
-                                    V->getType()->getScalarSizeInBits())));
+    return match(C,
+                 m_SpecificIntAllowPoison(V->getType()->getScalarSizeInBits()));
   };
 
   // It should look like variable-length sign-extension on the outside:

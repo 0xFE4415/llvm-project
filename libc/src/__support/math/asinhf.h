@@ -11,8 +11,8 @@
 
 #include "acoshf_utils.h"
 #include "src/__support/FPUtil/FPBits.h"
-#include "src/__support/FPUtil/PolyEval.h"
 #include "src/__support/FPUtil/multiply_add.h"
+#include "src/__support/FPUtil/polyeval.h"
 #include "src/__support/FPUtil/sqrt.h"
 #include "src/__support/macros/config.h"
 #include "src/__support/macros/optimization.h" // LIBC_UNLIKELY
@@ -21,7 +21,7 @@ namespace LIBC_NAMESPACE_DECL {
 
 namespace math {
 
-LIBC_INLINE constexpr float asinhf(float x) {
+LIBC_INLINE float asinhf(float x) {
   using namespace acoshf_internal;
   using FPBits_t = typename fputil::FPBits<float>;
   FPBits_t xbits(x);

@@ -1,5 +1,41 @@
 // RUN: mlir-opt -allow-unregistered-dialect %s -split-input-file -verify-diagnostics
 
+func.func @forall_scalable_normalized_upper_bound() {
+  // expected-error@below {{scalable indices are not supported}}
+  scf.forall (%i, %j) in ([8], 4) {
+  }
+  return
+}
+
+// -----
+
+func.func @forall_scalable_lower_bound() {
+  // expected-error@below {{scalable indices are not supported}}
+  scf.forall (%i, %j) = ([2], 0) to (8, 4) step (1, 1) {
+  }
+  return
+}
+
+// -----
+
+func.func @forall_scalable_upper_bound() {
+  // expected-error@below {{scalable indices are not supported}}
+  scf.forall (%i, %j) = (0, 0) to ([8], 4) step (1, 1) {
+  }
+  return
+}
+
+// -----
+
+func.func @forall_scalable_step() {
+  // expected-error@below {{scalable indices are not supported}}
+  scf.forall (%i, %j) = (0, 0) to (8, 4) step ([2], 1) {
+  }
+  return
+}
+
+// -----
+
 func.func @loop_for_lb(%arg0: f32, %arg1: index) {
   // expected-error@+1 {{operand #0 must be signless integer or index}}
   "scf.for"(%arg0, %arg1, %arg1) ({}) : (f32, index, index) -> ()
@@ -98,7 +134,7 @@ func.func @not_enough_loop_results(%arg0: index, %init: f32) {
 // -----
 
 func.func @scf_for_incorrect_result_type(%arg0: index, %init: f32) {
-  // expected-error @below{{along control flow edge from parent to parent: successor operand type #0 'f32' should match successor input type #0 'f64'}}
+  // expected-error @below{{along control flow edge from parent to Operation scf.for: successor operand type #0 'f32' should match successor input type #0 'f64'}}
   // expected-note @below{{region branch point}}
   "scf.for"(%arg0, %arg0, %arg0, %init) (
     {
@@ -418,7 +454,7 @@ func.func @reduceReturn_not_inside_reduce(%arg0 : f32) {
 
 func.func @std_if_incorrect_yield(%arg0: i1, %arg1: f32)
 {
-  // expected-error@+1 {{along control flow edge from Operation scf.yield to parent: region branch point has 1 operands, but region successor needs 2 inputs}}
+  // expected-error@+1 {{along control flow edge from Operation scf.yield to Operation scf.if: region branch point has 1 operands, but region successor needs 2 inputs}}
   %x, %y = scf.if %arg0 -> (f32, f32) {
     %0 = arith.addf %arg1, %arg1 : f32
     // expected-note@+1 {{region branch point}}
@@ -619,7 +655,7 @@ func.func @while_cross_region_type_mismatch() {
 
 func.func @while_result_type_mismatch() {
   %true = arith.constant true
-  // expected-error@+1 {{along control flow edge from Operation scf.condition to parent: region branch point has 1 operands, but region successor needs 0 inputs}}
+  // expected-error@+1 {{along control flow edge from Operation scf.condition to Operation scf.while: region branch point has 1 operands, but region successor needs 0 inputs}}
   scf.while : () -> () {
     // expected-note@+1 {{region branch point}}
     scf.condition(%true) %true : i1

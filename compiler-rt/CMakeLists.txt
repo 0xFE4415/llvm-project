@@ -3,8 +3,8 @@
 # An important constraint of the build is that it only produces libraries
 # based on the ability of the host toolchain to target various platforms.
 
-cmake_minimum_required(VERSION 3.20.0)
-set(LLVM_SUBPROJECT_TITLE "Compiler-RT")
+cmake_minimum_required(VERSION 3.31.0)
+set(LLVM_SUBPROJECT_TITLE "compiler-rt")
 
 if(NOT DEFINED LLVM_COMMON_CMAKE_UTILS)
   set(LLVM_COMMON_CMAKE_UTILS ${CMAKE_CURRENT_SOURCE_DIR}/../cmake)
@@ -84,6 +84,8 @@ option(COMPILER_RT_BUILD_CTX_PROFILE "Build ctx profile runtime" ON)
 mark_as_advanced(COMPILER_RT_BUILD_CTX_PROFILE)
 option(COMPILER_RT_BUILD_MEMPROF "Build memory profiling runtime" ON)
 mark_as_advanced(COMPILER_RT_BUILD_MEMPROF)
+option(COMPILER_RT_BUILD_COPYPROF "Build copy profiling runtime" ON)
+mark_as_advanced(COMPILER_RT_BUILD_COPYPROF)
 option(COMPILER_RT_BUILD_XRAY_NO_PREINIT "Build xray with no preinit patching" OFF)
 mark_as_advanced(COMPILER_RT_BUILD_XRAY_NO_PREINIT)
 option(COMPILER_RT_BUILD_ORC "Build ORC runtime" ON)
@@ -322,6 +324,19 @@ option(COMPILER_RT_USE_ATOMIC_LIBRARY "Use compiler-rt atomic instead of libatom
 
 option(COMPILER_RT_PROFILE_BAREMETAL "Build minimal baremetal profile library" OFF)
 
+set(COMPILER_RT_BUILD_PROFILE_ROCM_DEFAULT OFF)
+if("${CMAKE_SYSTEM_NAME}" MATCHES "^(Linux|Windows)$" AND
+   NOT COMPILER_RT_PROFILE_BAREMETAL)
+  set(COMPILER_RT_BUILD_PROFILE_ROCM_DEFAULT ON)
+endif()
+
+# clang_rt.profile_rocm is supported on Linux and Windows. It is built /MD on
+# Windows and depends on the sanitizer interception library.
+option(COMPILER_RT_BUILD_PROFILE_ROCM
+  "Build the host-side ROCm/HIP device profile collection runtime (clang_rt.profile_rocm)"
+  ${COMPILER_RT_BUILD_PROFILE_ROCM_DEFAULT})
+mark_as_advanced(COMPILER_RT_BUILD_PROFILE_ROCM)
+
 include(config-ix)
 
 #================================
@@ -370,11 +385,12 @@ if("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "hexagon")
   list(APPEND SANITIZER_COMMON_CFLAGS -fno-emulated-tls)
   string(APPEND COMPILER_RT_TEST_COMPILER_CFLAGS " -fno-emulated-tls")
 endif()
-if("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "amdgcn|nvptx")
+if(COMPILER_RT_GPU_BUILD)
   append_list_if(UBSAN_COMMON_SUPPORTED_ARCH -ffreestanding SANITIZER_COMMON_CFLAGS)
   append_list_if(COMPILER_RT_HAS_NOGPULIB_FLAG -nogpulib SANITIZER_COMMON_CFLAGS)
+  append_list_if(COMPILER_RT_HAS_NOSTDLIBINC_FLAG -nostdlibinc SANITIZER_COMMON_CFLAGS)
   append_list_if(COMPILER_RT_HAS_FLTO_FLAG -flto SANITIZER_COMMON_CFLAGS)
-  if("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "amdgcn")
+  if(COMPILER_RT_TARGET_AMDGPU)
     append_list_if(COMPILER_RT_HAS_CODE_OBJECT_VERSION_FLAG
                    "SHELL:-Xclang -mcode-object-version=none" SANITIZER_COMMON_CFLAGS)
   endif()
@@ -395,7 +411,7 @@ append_list_if(COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG -fvisibility=hidden SANIT
 if(NOT COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG)
   append_list_if(COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG -fvisibility-inlines-hidden SANITIZER_COMMON_CFLAGS)
 endif()
-if(NOT "${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "amdgcn|nvptx")
+if(NOT COMPILER_RT_GPU_BUILD)
   append_list_if(COMPILER_RT_HAS_FNO_LTO_FLAG -fno-lto SANITIZER_COMMON_CFLAGS)
 endif()
 
@@ -488,12 +504,12 @@ if (NOT MSVC)
 endif()
 
 # Determine if we should restrict stack frame sizes.
-# Stack frames on PowerPC, Mips, SystemZ and in debug build can be much larger than
-# anticipated.
+# Stack frames on PowerPC, Mips, SystemZ, PA-RISC and in debug build can be
+# much larger than anticipated.
 # FIXME: Fix all sanitizers and add -Wframe-larger-than to
 # SANITIZER_COMMON_FLAGS
 if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG AND NOT COMPILER_RT_DEBUG
-   AND NOT ${COMPILER_RT_DEFAULT_TARGET_ARCH} MATCHES "powerpc|mips|s390x")
+   AND NOT ${COMPILER_RT_DEFAULT_TARGET_ARCH} MATCHES "powerpc|mips|s390x|hppa")
   set(SANITIZER_LIMIT_FRAME_SIZE TRUE)
 else()
   set(SANITIZER_LIMIT_FRAME_SIZE FALSE)
@@ -509,10 +525,12 @@ endif()
 # in cflags during testing. This fixes the compiler/linker version mismatch
 # issue when running a clang built with a newer Xcode in an older Xcode
 set(COMPILER_RT_DARWIN_LINKER_VERSION)
-if (APPLE AND NOT CMAKE_LINKER MATCHES ".*lld.*")
+get_filename_component(CLANG_LINKER_NAME "${CMAKE_LINKER}" NAME)
+if (APPLE AND NOT CLANG_LINKER_NAME MATCHES "lld")
   get_darwin_linker_version(COMPILER_RT_DARWIN_LINKER_VERSION)
   message(STATUS "Host linker version: ${COMPILER_RT_DARWIN_LINKER_VERSION}")
 endif()
+unset(CLANG_LINKER_NAME)
 
 # Build sanitizer runtimes with debug info.
 if(MSVC)
@@ -527,7 +545,7 @@ if(MSVC)
     string(REGEX REPLACE "(^| )/Z[i7I]($| )" " /Z7 "
            "${var_to_update}" "${${var_to_update}}")
   endforeach()
-elseif(APPLE)
+elseif("${COMPILER_RT_DEFAULT_TARGET_TRIPLE}" MATCHES "apple")
   # On Apple platforms use full debug info (i.e. not `-gline-tables-only`)
   # for all build types so that the runtime can be debugged.
   if(NOT COMPILER_RT_HAS_G_FLAG)

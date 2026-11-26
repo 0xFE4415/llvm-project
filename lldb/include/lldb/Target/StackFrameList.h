@@ -11,10 +11,10 @@
 
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <vector>
 
 #include "lldb/Target/StackFrame.h"
+#include "llvm/Support/RWMutex.h"
 
 namespace lldb_private {
 
@@ -37,8 +37,9 @@ public:
   /// Get the frame at index \p idx. Invisible frames cannot be indexed.
   lldb::StackFrameSP GetFrameAtIndex(uint32_t idx);
 
-  /// Get the first concrete frame with index greater than or equal to \p idx.
-  /// Unlike \ref GetFrameAtIndex, this cannot return a synthetic frame.
+  /// Get the first visible frame whose concrete frame index is \p unwind_idx,
+  /// or nullptr if there is none. Unlike \ref GetFrameAtIndex, this cannot
+  /// return the artificial frame of a tail call.
   lldb::StackFrameSP GetFrameWithConcreteFrameIndex(uint32_t unwind_idx);
 
   /// Retrieve the stack frame with the given ID \p stack_id.
@@ -187,7 +188,7 @@ protected:
   /// unique lock is Clear.  All other clients take the shared lock, though
   /// if we need more frames we may swap shared for unique to fulfill that
   /// requirement.
-  mutable std::shared_mutex m_list_mutex;
+  mutable llvm::sys::RWMutex m_list_mutex;
 
   // Setting the inlined depth should be protected against other attempts to
   // change it, but since it doesn't mutate the list itself, we can limit the
@@ -243,9 +244,8 @@ protected:
 
 private:
   uint32_t SetSelectedFrameNoLock(lldb_private::StackFrame *frame);
-  lldb::StackFrameSP
-  GetFrameAtIndexNoLock(uint32_t idx,
-                        std::shared_lock<std::shared_mutex> &guard);
+  lldb::StackFrameSP GetFrameAtIndexNoLock(uint32_t idx,
+                                           llvm::sys::ScopedReader &guard);
 
   /// @{
   /// These two Fetch frames APIs and SynthesizeTailCallFrames are called in
