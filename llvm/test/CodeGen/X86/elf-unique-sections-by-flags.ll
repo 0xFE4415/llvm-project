@@ -136,3 +136,31 @@ define i32 @fn2_s2() section "s2" {
 ; CHECK:        .section s4,"aw",@progbits,unique,[[#U+5]]
 ; CHECK-NEXT:   .globl non_tls_var
 ; CHECK:        non_tls_var:
+
+;; A global with !exclude or !metadata_section_kind gets a unique section when
+;; its section name is already used with other flags.
+@rw_s5 = global i32 10, section "s5", align 4
+@exclude_s5 = global i32 10, section "s5", align 4, !exclude !0
+@metadata_s5 = global i32 10, section "s5", align 4, !metadata_section_kind !0
+; CHECK:        .section s5,"aw",@progbits{{$}}
+; CHECK-NEXT:   .globl rw_s5
+; CHECK:        rw_s5:
+; CHECK:        .section s5,"e",@progbits,unique,[[#U+6]]{{$}}
+; CHECK-NEXT:   .globl exclude_s5
+; CHECK:        exclude_s5:
+; CHECK:        .section s5,"",@progbits,unique,[[#U+7]]{{$}}
+; CHECK-NEXT:   .globl metadata_s5
+; CHECK:        metadata_s5:
+
+;; The same applies when the section name implies the metadata section kind.
+$comdat_llvmbc = comdat any
+@plain_llvmbc = constant i32 10, section ".llvmbc", align 4
+@comdat_llvmbc = constant i32 10, section ".llvmbc", comdat, align 4
+; CHECK:        .section .llvmbc,"",@progbits{{$}}
+; CHECK-NEXT:   .globl plain_llvmbc
+; CHECK:        plain_llvmbc:
+; CHECK:        .section .llvmbc,"G",@progbits,comdat_llvmbc,comdat,unique,[[#U+8]]{{$}}
+; CHECK-NEXT:   .globl comdat_llvmbc
+; CHECK:        comdat_llvmbc:
+
+!0 = !{}

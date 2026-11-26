@@ -772,12 +772,15 @@ calcUniqueIDUpdateFlagsAndSize(const GlobalObject *GO, StringRef SectionName,
   // implicitly for this symbol e.g. .rodata.str1.1, then we don't need
   // to unique the section as the entry size for this symbol will be
   // compatible with implicitly created sections.
-  SmallString<128> ImplicitSectionNameStem =
-      getELFSectionNameForGlobal(GO, Kind, Mang, TM, false, /*MJTE=*/nullptr);
+  // Only compute the implicit name for a mergeable symbol: the exclude and
+  // metadata section kinds have no implicit section.
   if (SymbolMergeable &&
-      Ctx.isELFImplicitMergeableSectionNamePrefix(SectionName) &&
-      SectionName.starts_with(ImplicitSectionNameStem))
-    return MCSection::NonUniqueID;
+      Ctx.isELFImplicitMergeableSectionNamePrefix(SectionName)) {
+    SmallString<128> ImplicitSectionNameStem = getELFSectionNameForGlobal(
+        GO, Kind, Mang, TM, /*UniqueSectionName=*/false, /*JTE=*/nullptr);
+    if (SectionName.starts_with(ImplicitSectionNameStem))
+      return MCSection::NonUniqueID;
+  }
 
   // We have seen this section name before, but with different flags or entity
   // size. Create a new unique ID.
